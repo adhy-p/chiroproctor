@@ -15,13 +15,15 @@ sensor_2_data = []
 goodVideos = ["OyK0oE5rwFY", "FkdceBcRa5w", "nr-pHthhMBE"]
 mediumVideos = ["dCsgXitfdls", "3aRpAO6bfvA"]
 badVideos = ["RqcOCBb4arc", "5R54QoUbbow"]
+currStatus = ""
 badCounter = 0
 consecBad = 0
 consecGood = 0
+battery = None
 
 def create_and_train_model():
-    df1 = pd.read_csv("test1.csv")
-    df2 = pd.read_csv("test2.csv")
+    df1 = pd.read_csv("training_data/test1.csv")
+    df2 = pd.read_csv("training_data/test2.csv")
 
     df1 = df1.iloc[6:].reset_index()
     df2 = df2.iloc[2:].reset_index()
@@ -133,6 +135,10 @@ def predict_posture():
     sensor_1_data.pop(0)
     sensor_2_data.pop(0)
 
+    global consecGood
+    global consecBad
+    global badCounter
+
     for p in predictions:
         if p[0] > p[1]:
             print("bad", p)
@@ -150,25 +156,38 @@ def predict_posture():
             return {"prediction": "good"}
 
 def get_video_recommendations():
-    if badCounter < 30:
-        return {"message": goodVideos}
-    elif badCounter < 100:
-        return {"message": mediumVideos}
-    else:
-        return {"message": badVideos}
+    global badCounter
+    global currStatus
+    if badCounter < 30 and currStatus != "good":
+        currStatus = "good"
+        return {"videos": goodVideos}
+    elif badCounter >= 30 and badCounter < 100 and currStatus != "medium":
+        currStatus = "medium"
+        return {"videos": mediumVideos}
+    elif badCounter >= 100 and currStatus != "bad":
+        currStatus = "bad"
+        return {"videos": badVideos}
+    return None
 
-def send_data(client, data, topic):
+def send_data(client, data, topic, retain):
     print("Sending data: ", data)
-    client.publish(topic, json.dumps(data))
+    client.publish(topic, json.dumps(data), retain=retain)
 
-def on_connect(client, userdata, flags, rc):
+def on_prediction_connect(client, userdata, flags, rc):
     if rc == 0:
         print("Successfully connected to broker.")
         client.subscribe("Group_2/classify")
     else:
         print("Connection failed with code: %d." % rc)
 
-def on_message(client, userdata, msg):
+def on_battery_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Successfully connected to broker.")
+        client.subscribe("Group_2/battery_info") # from Gateway
+    else:
+        print("Connection failed with code: %d." % rc)
+
+def on_prediction_message(client, userdata, msg):
     recv_dict = json.loads(msg.payload)
     if recv_dict["sensortag_id"] == 1:
         sensor_1_data.append(recv_dict)
@@ -176,10 +195,15 @@ def on_message(client, userdata, msg):
         sensor_2_data.append(recv_dict)
     posture_data = np.array(recv_dict["data"])
 
-def setup(hostname):
+# acts like a proxy and simply forwards the data
+def on_battery_message(client, userdata, msg):
+    recv_dict = json.loads(msg.payload)
+    send_data(client, recv_dict, "Group_2/battery", True)
+
+def setup(hostname, connect_callback, message_callback):
     client = mqtt.Client()
-    client.on_connect = on_connect
-    client.on_message = on_message
+    client.on_connect = connect_callback
+    client.on_message = message_callback
     client.connect(hostname)
     client.loop_start()
     return client
@@ -188,13 +212,16 @@ def main():
     global model
     model = create_and_train_model()
     # test_model_with_csv()
-    client = setup("127.0.0.1")
+    gateway = setup("127.0.0.1", on_prediction_connect, on_prediction_message)
+    gateway_metadata = setup("127.0.0.1", on_battery_connect, on_battery_message)
     while True:
         time.sleep(0.5)
         result = predict_posture()
-        send_data(client, result, "Group_2/predict")
+        if result is not None:
+            send_data(gateway, result, "Group_2/predict", False)
         videos = get_video_recommendations()
-        send_data(client, videos, "Group_2/video")
+        if videos is not None:
+            send_data(gateway, videos, "Group_2/video", True)
         pass
 
 if __name__ == '__main__':

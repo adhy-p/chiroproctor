@@ -1,19 +1,24 @@
-from time import time
 from bluepy.btle import UUID, Peripheral, DefaultDelegate, AssignedNumbers
-import struct
-import math
-
 import csv
+import datetime as dt
+import json
+import math
 import os
-import signal
-import sys
 import paho.mqtt.client as mqtt
 import pandas as pd
-import json
+import signal
+import struct
+import sys
+from time import time
 
-import datetime as dt
+# For buzzer
+consecutive_bad_postures = 0
+current_posture = None
+buzzer_is_active = False
 
+# For data collection
 has_good_posture = "GOOD"
+
 def sigint_handler(sig, frame):
     global has_good_posture
     has_good_posture = ("BAD" if has_good_posture == "GOOD" else "GOOD")
@@ -26,10 +31,7 @@ class CsvReader:
     headers = ['time', 'acc_x', 'acc_y', 'acc_z', 'gyr_x', 'gyr_y', 'gyr_z', 'posture']
 
     def __init__(self, sensortag_mac):
-        if sensortag_mac == "54:6C:0E:B6:D3:85":
-            sensortag_id = 1
-        else:
-            sensortag_id = 2
+        sensortag_id = (1 if sensortag_mac == "54:6C:0E:B6:D3:85" else 2)
         self.filename = "sensortag-" + str(sensortag_id) + '.csv'
         self.file = open(self.filename, 'a')
         self.writer = csv.writer(self.file, lineterminator='\n')
@@ -43,6 +45,7 @@ class CsvReader:
         print(timestamp)
         self.writer.writerow([timestamp] + list(rowdata))
 
+
 class MQTT:
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
@@ -52,8 +55,17 @@ class MQTT:
             print("Failed to connect. Error code: %d." % rc)
 
     def on_message(self, client, userdata, msg):
-        print("Received message from server.")
+        result = json.loads(msg.payload)
 
+        if result is None:
+            return
+
+        global current_posture
+        if result["prediction"] == "good":
+            current_posture = "good"
+        else:
+            current_posture = "bad"
+        
     def setup(self, hostname):
         client = mqtt.Client()
         client.on_connect = self.on_connect
@@ -63,12 +75,14 @@ class MQTT:
         return client
 
     def send_data(self, client, sensortag_mac, number, data):
-        if sensortag_mac == "54:6C:0E:B6:D3:85":
-            sensortag_id = 1
-        else:
-            sensortag_id = 2
+        sensortag_id = (1 if sensortag_mac == "54:6C:0E:B6:D3:85" else 2)
         send_dict = {"data_id":number, "sensortag_id": sensortag_id, "data":data, "posture": has_good_posture}
         client.publish("Group_2/classify", json.dumps(send_dict))
+
+    def send_battery_data(self, client, sensortag_mac, data):
+        sensortag_id = (1 if sensortag_mac == "54:6C:0E:B6:D3:85" else 2)
+        send_dict = {"sensortag_id": sensortag_id, "battery": data}
+        client.publish("Group_2/battery_info", json.dumps(send_dict))
 
 
 def _TI_UUID(val):
@@ -114,57 +128,6 @@ class SensorBase:
 
 def calcPoly(coeffs, x):
     return coeffs[0] + (coeffs[1]*x) + (coeffs[2]*x*x)
-
-
-class IRTemperatureSensor(SensorBase):
-    svcUUID = _TI_UUID(0xAA00)
-    dataUUID = _TI_UUID(0xAA01)
-    ctrlUUID = _TI_UUID(0xAA02)
-
-    zeroC = 273.15  # Kelvin
-    tRef = 298.15
-    Apoly = [1.0,      1.75e-3, -1.678e-5]
-    Bpoly = [-2.94e-5, -5.7e-7,  4.63e-9]
-    Cpoly = [0.0,      1.0,      13.4]
-
-    def __init__(self, periph):
-        SensorBase.__init__(self, periph)
-        self.S0 = 6.4e-14
-
-    def read(self):
-        '''Returns (ambient_temp, target_temp) in degC'''
-
-        # See http://processors.wiki.ti.com/index.php/SensorTag_User_Guide#IR_Temperature_Sensor
-        (rawVobj, rawTamb) = struct.unpack('<hh', self.data.read())
-        tAmb = rawTamb / 128.0
-        Vobj = 1.5625e-7 * rawVobj
-
-        tDie = tAmb + self.zeroC
-        S = self.S0 * calcPoly(self.Apoly, tDie-self.tRef)
-        Vos = calcPoly(self.Bpoly, tDie-self.tRef)
-        fObj = calcPoly(self.Cpoly, Vobj-Vos)
-
-        tObj = math.pow(math.pow(tDie, 4.0) + (fObj/S), 0.25)
-        return (tAmb, tObj - self.zeroC)
-
-
-class IRTemperatureSensorTMP007(SensorBase):
-    svcUUID = _TI_UUID(0xAA00)
-    dataUUID = _TI_UUID(0xAA01)
-    ctrlUUID = _TI_UUID(0xAA02)
-
-    SCALE_LSB = 0.03125
-
-    def __init__(self, periph):
-        SensorBase.__init__(self, periph)
-
-    def read(self):
-        '''Returns (ambient_temp, target_temp) in degC'''
-        # http://processors.wiki.ti.com/index.php/CC2650_SensorTag_User's_Guide?keyMatch=CC2650&tisearch=Search-EN
-        (rawTobj, rawTamb) = struct.unpack('<hh', self.data.read())
-        tObj = (rawTobj >> 2) * self.SCALE_LSB
-        tAmb = (rawTamb >> 2) * self.SCALE_LSB
-        return (tAmb, tObj)
 
 
 class AccelerometerSensor(SensorBase):
@@ -233,121 +196,6 @@ class AccelerometerSensorMPU9250:
         rawVals = self.sensor.rawRead()[3:6]
         return tuple([v*self.scale for v in rawVals])
 
-
-class HumiditySensor(SensorBase):
-    svcUUID = _TI_UUID(0xAA20)
-    dataUUID = _TI_UUID(0xAA21)
-    ctrlUUID = _TI_UUID(0xAA22)
-
-    def __init__(self, periph):
-        SensorBase.__init__(self, periph)
-
-    def read(self):
-        '''Returns (ambient_temp, rel_humidity)'''
-        (rawT, rawH) = struct.unpack('<HH', self.data.read())
-        temp = -46.85 + 175.72 * (rawT / 65536.0)
-        RH = -6.0 + 125.0 * ((rawH & 0xFFFC)/65536.0)
-        return (temp, RH)
-
-
-class HumiditySensorHDC1000(SensorBase):
-    svcUUID = _TI_UUID(0xAA20)
-    dataUUID = _TI_UUID(0xAA21)
-    ctrlUUID = _TI_UUID(0xAA22)
-
-    def __init__(self, periph):
-        SensorBase.__init__(self, periph)
-
-    def read(self):
-        '''Returns (ambient_temp, rel_humidity)'''
-        (rawT, rawH) = struct.unpack('<HH', self.data.read())
-        temp = -40.0 + 165.0 * (rawT / 65536.0)
-        RH = 100.0 * (rawH/65536.0)
-        return (temp, RH)
-
-
-class MagnetometerSensor(SensorBase):
-    svcUUID = _TI_UUID(0xAA30)
-    dataUUID = _TI_UUID(0xAA31)
-    ctrlUUID = _TI_UUID(0xAA32)
-
-    def __init__(self, periph):
-        SensorBase.__init__(self, periph)
-
-    def read(self):
-        '''Returns (x, y, z) in uT units'''
-        x_y_z = struct.unpack('<hhh', self.data.read())
-        return tuple([1000.0 * (v/32768.0) for v in x_y_z])
-        # Revisit - some absolute calibration is needed
-
-
-class MagnetometerSensorMPU9250:
-    def __init__(self, sensor_):
-        self.sensor = sensor_
-        self.scale = 4912.0 / 32760
-        # Reference: MPU-9250 register map v1.4
-
-    def enable(self):
-        self.sensor.enable(self.sensor.MAG_XYZ)
-
-    def disable(self):
-        self.sensor.disable(self.sensor.MAG_XYZ)
-
-    def read(self):
-        '''Returns (x_mag, y_mag, z_mag) in units of uT'''
-        rawVals = self.sensor.rawRead()[6:9]
-        return tuple([v*self.scale for v in rawVals])
-
-
-class BarometerSensor(SensorBase):
-    svcUUID = _TI_UUID(0xAA40)
-    dataUUID = _TI_UUID(0xAA41)
-    ctrlUUID = _TI_UUID(0xAA42)
-    calUUID = _TI_UUID(0xAA43)
-    sensorOn = None
-
-    def __init__(self, periph):
-        SensorBase.__init__(self, periph)
-
-    def enable(self):
-        SensorBase.enable(self)
-        self.calChr = self.service.getCharacteristics(self.calUUID)[0]
-
-        # Read calibration data
-        self.ctrl.write(struct.pack("B", 0x02), True)
-        (c1, c2, c3, c4, c5, c6, c7, c8) = struct.unpack(
-            "<HHHHhhhh", self.calChr.read())
-        self.c1_s = c1/float(1 << 24)
-        self.c2_s = c2/float(1 << 10)
-        self.sensPoly = [c3/1.0, c4/float(1 << 17), c5/float(1 << 34)]
-        self.offsPoly = [c6*float(1 << 14), c7/8.0, c8/float(1 << 19)]
-        self.ctrl.write(struct.pack("B", 0x01), True)
-
-    def read(self):
-        '''Returns (ambient_temp, pressure_millibars)'''
-        (rawT, rawP) = struct.unpack('<hH', self.data.read())
-        temp = (self.c1_s * rawT) + self.c2_s
-        sens = calcPoly(self.sensPoly, float(rawT))
-        offs = calcPoly(self.offsPoly, float(rawT))
-        pres = (sens * rawP + offs) / (100.0 * float(1 << 14))
-        return (temp, pres)
-
-
-class BarometerSensorBMP280(SensorBase):
-    svcUUID = _TI_UUID(0xAA40)
-    dataUUID = _TI_UUID(0xAA41)
-    ctrlUUID = _TI_UUID(0xAA42)
-
-    def __init__(self, periph):
-        SensorBase.__init__(self, periph)
-
-    def read(self):
-        (tL, tM, tH, pL, pM, pH) = struct.unpack('<BBBBBB', self.data.read())
-        temp = (tH*65536 + tM*256 + tL) / 100.0
-        press = (pH*65536 + pM*256 + pL) / 100.0
-        return (temp, press)
-
-
 class GyroscopeSensor(SensorBase):
     svcUUID = _TI_UUID(0xAA50)
     dataUUID = _TI_UUID(0xAA51)
@@ -380,40 +228,6 @@ class GyroscopeSensorMPU9250:
         return tuple([v*self.scale for v in rawVals])
 
 
-class KeypressSensor(SensorBase):
-    svcUUID = UUID(0xFFE0)
-    dataUUID = UUID(0xFFE1)
-    ctrlUUID = None
-    sensorOn = None
-
-    def __init__(self, periph):
-        SensorBase.__init__(self, periph)
-
-    def enable(self):
-        SensorBase.enable(self)
-        self.char_descr = self.service.getDescriptors(forUUID=0x2902)[0]
-        self.char_descr.write(struct.pack('<bb', 0x01, 0x00), True)
-
-    def disable(self):
-        self.char_descr.write(struct.pack('<bb', 0x00, 0x00), True)
-
-
-class OpticalSensorOPT3001(SensorBase):
-    svcUUID = _TI_UUID(0xAA70)
-    dataUUID = _TI_UUID(0xAA71)
-    ctrlUUID = _TI_UUID(0xAA72)
-
-    def __init__(self, periph):
-        SensorBase.__init__(self, periph)
-
-    def read(self):
-        '''Returns value in lux'''
-        raw = struct.unpack('<h', self.data.read())[0]
-        m = raw & 0xFFF
-        e = (raw & 0xF000) >> 12
-        return 0.01 * (m << e)
-
-
 class BatterySensor(SensorBase):
     svcUUID = UUID("0000180f-0000-1000-8000-00805f9b34fb")
     dataUUID = UUID("00002a19-0000-1000-8000-00805f9b34fb")
@@ -428,6 +242,26 @@ class BatterySensor(SensorBase):
         val = ord(self.data.read())
         return val
 
+class LEDAndBuzzer(SensorBase):
+    '''
+    UUID obtained from:
+    https://usermanual.wiki/Document/CC265020SensorTag20Users20Guide2020Texas20Instruments20Wiki.2070227354.pdf
+    (Under IO service)
+    ''' 
+    svcUUID = _TI_UUID(0xAA64)
+    dataUUID = _TI_UUID(0xAA65)
+    ctrlUUID = _TI_UUID(0xAA66)
+    sensorOn = struct.pack("B", 0x01)
+
+    def __init__(self, periph):
+        SensorBase.__init__(self, periph)
+
+    def activate_buzzer(self):
+        print("Buzzer activated")
+        self.data.write(struct.pack("B", 0x01), withResponse=False) # TODO: change value from 0x1 (red LED) to 0x4 (buzzer)
+    def deactivate_buzzer(self):
+        print("Buzzer deactivated")
+        self.data.write(struct.pack("B", 0x00), withResponse=False)
 
 class SensorTag(Peripheral):
     def __init__(self, addr, version=AUTODETECT):
@@ -446,61 +280,29 @@ class SensorTag(Peripheral):
         else:
             self.firmwareVersion = u''
 
-        if version == SENSORTAG_V1:
-            self.IRtemperature = IRTemperatureSensor(self)
-            self.accelerometer = AccelerometerSensor(self)
-            self.humidity = HumiditySensor(self)
-            self.magnetometer = MagnetometerSensor(self)
-            self.barometer = BarometerSensor(self)
-            self.gyroscope = GyroscopeSensor(self)
-            self.keypress = KeypressSensor(self)
-            self.lightmeter = None
-        elif version == SENSORTAG_2650:
-            self._mpu9250 = MovementSensorMPU9250(self)
-            self.IRtemperature = IRTemperatureSensorTMP007(self)
-            self.accelerometer = AccelerometerSensorMPU9250(self._mpu9250)
-            self.humidity = HumiditySensorHDC1000(self)
-            self.magnetometer = MagnetometerSensorMPU9250(self._mpu9250)
-            self.barometer = BarometerSensorBMP280(self)
-            self.gyroscope = GyroscopeSensorMPU9250(self._mpu9250)
-            self.keypress = KeypressSensor(self)
-            self.lightmeter = OpticalSensorOPT3001(self)
-            self.battery = BatterySensor(self)
+        self._mpu9250 = MovementSensorMPU9250(self)
+        self.accelerometer = AccelerometerSensorMPU9250(self._mpu9250)
+        self.gyroscope = GyroscopeSensorMPU9250(self._mpu9250)
+        self.battery = BatterySensor(self)
+        self.IO = LEDAndBuzzer(self)
 
+def notify_edge_devices(tag, host):
+    global consecutive_bad_postures
+    global current_posture
+    global buzzer_is_active
+    if host == "54:6C:0E:52:EF:9E" and current_posture is not None:
+        if current_posture == "good":
+            consecutive_bad_postures = 0
+            if buzzer_is_active:
+                tag.IO.deactivate_buzzer()
+                buzzer_is_active = False
+        else:
+            consecutive_bad_postures += 1 
+        current_posture = None
 
-class KeypressDelegate(DefaultDelegate):
-    BUTTON_L = 0x02
-    BUTTON_R = 0x01
-    ALL_BUTTONS = (BUTTON_L | BUTTON_R)
-
-    _button_desc = {
-        BUTTON_L: "Left button",
-        BUTTON_R: "Right button",
-        ALL_BUTTONS: "Both buttons"
-    }
-
-    def __init__(self):
-        DefaultDelegate.__init__(self)
-        self.lastVal = 0
-
-    def handleNotification(self, hnd, data):
-        # NB: only one source of notifications at present
-        # so we can ignore 'hnd'.
-        val = struct.unpack("B", data)[0]
-        down = (val & ~self.lastVal) & self.ALL_BUTTONS
-        if down != 0:
-            self.onButtonDown(down)
-        up = (~val & self.lastVal) & self.ALL_BUTTONS
-        if up != 0:
-            self.onButtonUp(up)
-        self.lastVal = val
-
-    def onButtonUp(self, but):
-        print("** " + self._button_desc[but] + " UP")
-
-    def onButtonDown(self, but):
-        print("** " + self._button_desc[but] + " DOWN")
-
+    if consecutive_bad_postures >= 10 and not buzzer_is_active:
+        tag.IO.activate_buzzer()
+        buzzer_is_active = True
 
 def main():
     import time
@@ -513,106 +315,72 @@ def main():
                         type=int, help="Number of times to loop data")
     parser.add_argument('-t', action='store', type=float,
                         default=5.0, help='time between polling')
-    parser.add_argument('-T', '--temperature',
-                        action="store_true", default=False)
-    parser.add_argument('-A', '--accelerometer', action='store_true',
-                        default=False)
-    parser.add_argument('-H', '--humidity', action='store_true', default=False)
-    parser.add_argument('-M', '--magnetometer', action='store_true',
-                        default=False)
-    parser.add_argument('-B', '--barometer',
-                        action='store_true', default=False)
-    parser.add_argument('-G', '--gyroscope',
-                        action='store_true', default=False)
-    parser.add_argument('-K', '--keypress', action='store_true', default=False)
-    parser.add_argument('-L', '--light', action='store_true', default=False)
-    parser.add_argument('-P', '--battery', action='store_true', default=False)
-    parser.add_argument('--all', action='store_true', default=False)
 
     arg = parser.parse_args(sys.argv[1:])
 
     print('Connecting to ' + arg.host)
+    global tag
     tag = SensorTag(arg.host)
 
-    # Enabling selected sensors
-    if arg.temperature or arg.all:
-        tag.IRtemperature.enable()
-    if arg.humidity or arg.all:
-        tag.humidity.enable()
-    if arg.barometer or arg.all:
-        tag.barometer.enable()
-    if arg.accelerometer or arg.all:
-        tag.accelerometer.enable()
-    if arg.magnetometer or arg.all:
-        tag.magnetometer.enable()
-    if arg.gyroscope or arg.all:
-        tag.gyroscope.enable()
-    if arg.battery or arg.all:
-        tag.battery.enable()
-    if arg.keypress or arg.all:
-        tag.keypress.enable()
-        tag.setDelegate(KeypressDelegate())
-    if arg.light and tag.lightmeter is None:
-        print("Warning: no lightmeter on this device")
-    if (arg.light or arg.all) and tag.lightmeter is not None:
-        tag.lightmeter.enable()
+    # Enabling the relevant sensors
+    tag.accelerometer.enable()
+    tag.gyroscope.enable()
+    tag.battery.enable()
+    if arg.host == "54:6C:0E:52:EF:9E":
+        tag.IO.enable()
 
     # Some sensors (e.g., temperature, accelerometer) need some time for initialization.
     # Not waiting here after enabling a sensor, the first read value might be empty or incorrect.
-    time.sleep(1.0)
-    
+    time.sleep(5.0)
+
+    if arg.host == "54:6C:0E:52:EF:9E":
+        tag.IO.deactivate_buzzer()
+
     signal.signal(signal.SIGINT, sigint_handler)
     signal.signal(signal.SIGTERM, sigterm_handler)
 
-    csv_reader = CsvReader(arg.host)
+    # csv_reader = CsvReader(arg.host)
     mosquitto = MQTT()
-    client = mosquitto.setup("127.0.0.1")
-    # df1 = pd.read_csv("sensortag-1-train.csv")
-    # df2 = pd.read_csv("sensortag-2-train.csv")
-    # list1 = df1.values.tolist()
-    # list2 = df2.values.tolist()
+    server = mosquitto.setup("54.255.139.76")
+    # server = mosquitto.setup("127.0.0.1")
+
+    battery = tag.battery.read()
+    print("Battery: ", battery)
+    mosquitto.send_battery_data(server, arg.host, battery)
+
     counter = 1
     rows = []
     while True:
         data = []
-        if arg.temperature or arg.all:
-            print('Temp: ', tag.IRtemperature.read())
-        if arg.humidity or arg.all:
-            print("Humidity: ", tag.humidity.read())
-        if arg.barometer or arg.all:
-            print("Barometer: ", tag.barometer.read())
-        if arg.accelerometer or arg.all:
-            x = tag.accelerometer.read()
-            data += list(x)
-            print("Accelerometer: ", x)
-        if arg.magnetometer or arg.all:
-            print("Magnetometer: ", tag.magnetometer.read())
-        if arg.gyroscope or arg.all:
-            x = tag.gyroscope.read()
-            data += list(x)
-            print("Gyroscope: ", x)
-        if (arg.light or arg.all) and tag.lightmeter is not None:
-            print("Light: ", tag.lightmeter.read())
-        if arg.battery or arg.all:
-            print("Battery: ", tag.battery.read())
-        if counter >= arg.count and arg.count != 0:
-            break
-        print(has_good_posture)
-        data += [has_good_posture]
-        
-        csv_reader.write_row(data)
-        rows.append(data)
-        # if arg.host == "54:6C:0E:B6:D3:85":
-        #     rows.append(list1[counter - 1])
-        # else:
-        #     rows.append(list2[counter - 1])
-        
-        counter += 1
-        if len(rows) == 10:
-            mosquitto.send_data(client, arg.host, counter // 10, list(rows))
-            rows = rows[2:]
-        tag.waitForNotifications(arg.t)
 
+        acc = tag.accelerometer.read()
+        data += list(acc)
+        print("Accelerometer: ", acc)
+
+        gyro = tag.gyroscope.read()
+        data += list(gyro)
+        print("Gyroscope: ", gyro)
+
+        curr_battery = tag.battery.read()
+        if curr_battery != battery:
+            battery = curr_battery
+            mosquitto.send_battery_data(server, arg.host, battery)
+            print("Battery: ", battery)
+
+        data += [has_good_posture]
+        # uncomment to collect data
+        # csv_reader.write_row(data) 
+        rows.append(data)
+        counter += 1
+
+        if len(rows) == 10:
+            mosquitto.send_data(server, arg.host, counter // 10, list(rows))
+            rows = rows[2:]
+            
+        # Send task to buffer in the while loop to avoid race condition
+        notify_edge_devices(tag, arg.host)
+
+        tag.waitForNotifications(arg.t)
     tag.disconnect()
     del tag
 
