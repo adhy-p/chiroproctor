@@ -12,6 +12,12 @@ from keras.layers import LSTM, Dense, Flatten, Dropout
 model = None
 sensor_1_data = []
 sensor_2_data = []
+goodVideos = ["OyK0oE5rwFY", "FkdceBcRa5w", "nr-pHthhMBE"]
+mediumVideos = ["dCsgXitfdls", "3aRpAO6bfvA"]
+badVideos = ["RqcOCBb4arc", "5R54QoUbbow"]
+badCounter = 0
+consecBad = 0
+consecGood = 0
 
 def create_and_train_model():
     df1 = pd.read_csv("test1.csv")
@@ -130,14 +136,30 @@ def predict_posture():
     for p in predictions:
         if p[0] > p[1]:
             print("bad", p)
+            consecGood = 0
+            consecBad += 1
+            if consecBad > 10:
+                badCounter += 1
             return {"prediction": "bad"}
         else:
             print("good", p)
+            consecBad = 0
+            consecGood += 1
+            if consecGood > 10:
+                badCounter = 0
             return {"prediction": "good"}
-            
-def send_data(client, result):
-    print("Sending results: ", result)
-    client.publish("Group_2/predict", json.dumps(result))
+
+def get_video_recommendations():
+    if badCounter < 30:
+        return {"message": goodVideos}
+    elif badCounter < 100:
+        return {"message": mediumVideos}
+    else:
+        return {"message": badVideos}
+
+def send_data(client, data, topic):
+    print("Sending data: ", data)
+    client.publish(topic, json.dumps(data))
 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
@@ -170,7 +192,9 @@ def main():
     while True:
         time.sleep(0.5)
         result = predict_posture()
-        send_data(client, result)
+        send_data(client, result, "Group_2/predict")
+        videos = get_video_recommendations()
+        send_data(client, videos, "Group_2/video")
         pass
 
 if __name__ == '__main__':
