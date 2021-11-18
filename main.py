@@ -258,7 +258,7 @@ class LEDAndBuzzer(SensorBase):
 
     def activate_buzzer(self):
         print("Buzzer activated")
-        self.data.write(struct.pack("B", 0x01), withResponse=False) # TODO: change value from 0x1 (red LED) to 0x4 (buzzer)
+        self.data.write(struct.pack("B", 0x04), withResponse=False) # TODO: change value from 0x1 (red LED) to 0x4 (buzzer)
     def deactivate_buzzer(self):
         print("Buzzer deactivated")
         self.data.write(struct.pack("B", 0x00), withResponse=False)
@@ -290,7 +290,7 @@ def notify_edge_devices(tag, host):
     global consecutive_bad_postures
     global current_posture
     global buzzer_is_active
-    if host == "54:6C:0E:52:EF:9E" and current_posture is not None:
+    if current_posture is not None:
         if current_posture == "good":
             consecutive_bad_postures = 0
             if buzzer_is_active:
@@ -300,7 +300,7 @@ def notify_edge_devices(tag, host):
             consecutive_bad_postures += 1 
         current_posture = None
 
-    if consecutive_bad_postures >= 10 and not buzzer_is_active:
+    if consecutive_bad_postures >= 5 and not buzzer_is_active:
         tag.IO.activate_buzzer()
         buzzer_is_active = True
 
@@ -326,15 +326,13 @@ def main():
     tag.accelerometer.enable()
     tag.gyroscope.enable()
     tag.battery.enable()
-    if arg.host == "54:6C:0E:52:EF:9E":
-        tag.IO.enable()
+    tag.IO.enable()
 
     # Some sensors (e.g., temperature, accelerometer) need some time for initialization.
     # Not waiting here after enabling a sensor, the first read value might be empty or incorrect.
     time.sleep(5.0)
 
-    if arg.host == "54:6C:0E:52:EF:9E":
-        tag.IO.deactivate_buzzer()
+    tag.IO.deactivate_buzzer()
 
     signal.signal(signal.SIGINT, sigint_handler)
     signal.signal(signal.SIGTERM, sigterm_handler)
@@ -357,9 +355,9 @@ def main():
         data += list(acc)
         print("Accelerometer: ", acc)
 
-        gyro = tag.gyroscope.read()
-        data += list(gyro)
-        print("Gyroscope: ", gyro)
+        # gyro = tag.gyroscope.read()
+        data += list((0,0,0))
+        # print("Gyroscope: ", gyro)
 
         curr_battery = tag.battery.read()
         if curr_battery != battery:
