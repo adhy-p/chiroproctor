@@ -17,12 +17,18 @@ current_posture = None
 buzzer_is_active = False
 
 # For data collection
-has_good_posture = "GOOD"
+i = 0
+posture_label = "NORMAL"
 
 def sigint_handler(sig, frame):
-    global has_good_posture
-    has_good_posture = ("BAD" if has_good_posture == "GOOD" else "GOOD")
-    print('Posture state changed')
+    global posture_label
+    global i
+    posture_states = ["NORMAL", "KYPHOSIS", "SCOLIOSIS", "LORDOSIS"]
+    posture_label = posture_states[i]
+    i += 1
+    i %= 4
+    # print('Posture state changed')
+    # print(posture_states[i])
     
 def sigterm_handler(sig, frame):
     sys.exit(0)
@@ -61,7 +67,7 @@ class MQTT:
             return
 
         global current_posture
-        if result["prediction"] == "good":
+        if result["prediction"] == "NORMAL":
             current_posture = "good"
         else:
             current_posture = "bad"
@@ -76,7 +82,7 @@ class MQTT:
 
     def send_data(self, client, sensortag_mac, number, data):
         sensortag_id = (1 if sensortag_mac == "54:6C:0E:B6:D3:85" else 2)
-        send_dict = {"data_id":number, "sensortag_id": sensortag_id, "data":data, "posture": has_good_posture}
+        send_dict = {"data_id":number, "sensortag_id": sensortag_id, "data":data, "posture": posture_label}
         client.publish("Group_2/classify", json.dumps(send_dict))
 
     def send_battery_data(self, client, sensortag_mac, data):
@@ -365,7 +371,7 @@ def main():
             mosquitto.send_battery_data(server, arg.host, battery)
             print("Battery: ", battery)
 
-        data += [has_good_posture]
+        data += [posture_label]
         # uncomment to collect data
         # csv_reader.write_row(data) 
         rows.append(data)
@@ -376,7 +382,7 @@ def main():
             rows = rows[2:]
             
         # Send task to buffer in the while loop to avoid race condition
-        notify_edge_devices(tag, arg.host)
+        # notify_edge_devices(tag, arg.host)
 
         tag.waitForNotifications(arg.t)
     tag.disconnect()
