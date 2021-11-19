@@ -89,12 +89,14 @@ def create_and_train_model():
 #         print(arr[p.index(max(p))])
 
 def predict_posture():
+    global sensor_1_data
+    global sensor_2_data
     num_data_points = min(len(sensor_1_data), len(sensor_2_data))
     if num_data_points == 0:
         return None
 
-    df1 = pd.DataFrame(np.array(sensor_1_data[0]["data"]))
-    df2 = pd.DataFrame(np.array(sensor_2_data[0]["data"]))
+    df1 = pd.DataFrame(np.array(sensor_1_data[-1]["data"]))
+    df2 = pd.DataFrame(np.array(sensor_2_data[-1]["data"]))
     df1 = df1.drop(columns=[6])
     df2 = df2.drop(columns=[6])
 
@@ -121,8 +123,8 @@ def predict_posture():
     reshaped_segments_test = np.asarray(segments_test, dtype = np.float32).reshape(-1, 10, 6)
     predictions = model.predict(reshaped_segments_test)
 
-    sensor_1_data.pop(0)
-    sensor_2_data.pop(0)
+    sensor_1_data = []
+    sensor_2_data = []
 
     global consecGood
     global consecBad
@@ -148,13 +150,13 @@ def predict_posture():
 def get_video_recommendations():
     global badCounter
     global currStatus
-    if badCounter < 30 and currStatus != "good":
+    if badCounter < 10 and currStatus != "good":
         currStatus = "good"
         return {"videos": goodVideos}
-    elif badCounter >= 30 and badCounter < 100 and currStatus != "medium":
+    elif badCounter >= 10 and badCounter < 20 and currStatus != "medium":
         currStatus = "medium"
         return {"videos": mediumVideos}
-    elif badCounter >= 100 and currStatus != "bad":
+    elif badCounter >= 20 and currStatus != "bad":
         currStatus = "bad"
         return {"videos": badVideos}
     return None
