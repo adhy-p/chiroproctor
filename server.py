@@ -22,14 +22,11 @@ consecGood = 0
 battery = None
 
 def create_and_train_model():
-    df1 = pd.read_csv("training_data/test1.csv")
-    df2 = pd.read_csv("training_data/test2.csv")
+    df1 = pd.read_csv("training_data/multitrain1.csv")
+    df2 = pd.read_csv("training_data/multitrain2.csv")
 
-    df1 = df1.iloc[6:].reset_index()
-    df2 = df2.iloc[2:].reset_index()
-
-    df1 = df1.drop(columns=['index', 'time', 'posture'])
-    df2 = df2.drop(columns=['index', 'time'])
+    df1 = df1.drop(columns=['time', 'posture'])
+    df2 = df2.drop(columns=['time'])
 
     df1.columns = [str(col) + '_1' for col in df1.columns]
     df2.columns = [str(col) + '_2' if not col == 'posture' else 'posture' for col in df2.columns]
@@ -47,12 +44,6 @@ def create_and_train_model():
         ax2 = df['acc_x_2'].values[i: i + 10]
         ay2 = df['acc_y_2'].values[i: i + 10]
         az2 = df['acc_z_2'].values[i: i + 10]
-        gx1 = df['gyr_x_1'].values[i: i + 10]
-        gy1 = df['gyr_y_1'].values[i: i + 10]
-        gz1 = df['gyr_z_1'].values[i: i + 10]
-        gx2 = df['gyr_x_2'].values[i: i + 10]
-        gy2 = df['gyr_y_2'].values[i: i + 10]
-        gz2 = df['gyr_z_2'].values[i: i + 10]
         label = stats.mode(df['posture'][i: i + 10])[0][0]
         segments.append([ax1, ay1, az1, ax2, ay2, az2])
         labels.append(label)
@@ -71,41 +62,41 @@ def create_and_train_model():
     # Softmax layer
     model.add(Dense(y_train.shape[1], activation = 'softmax'))
     # Compile model
-    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
 
-    history = model.fit(X_train, y_train, epochs = 20, validation_split = 0.20, batch_size = 200, verbose = 1)
+    history = model.fit(X_train, y_train, epochs = 150, validation_split = 0.20, batch_size = 200, verbose = 1)
     loss, accuracy = model.evaluate(X_test, y_test, batch_size = 200, verbose = 1)
     print("Test Accuracy :", accuracy)
     print("Test Loss :", loss)
     return model
 
-def test_model_with_csv():
-    time_steps = 10
-    df_test = pd.read_csv("adhy-sitting-test.csv")
-    print(df_test.head())
-    segments_test = []
-    for i in range(0,  df_test.shape[0] - time_steps, 2):  
-        xs = df_test['acc_x'].values[i: i + 10]
-        ys = df_test['acc_y'].values[i: i + 10]
-        zs = df_test['acc_z'].values[i: i + 10]
-        segments_test.append([xs, ys, zs])
+# def test_model_with_csv():
+#     time_steps = 10
+#     df_test = pd.read_csv("adhy-sitting-test.csv")
+#     print(df_test.head())
+#     segments_test = []
+#     for i in range(0,  df_test.shape[0] - time_steps, 2):  
+#         xs = df_test['acc_x'].values[i: i + 10]
+#         ys = df_test['acc_y'].values[i: i + 10]
+#         zs = df_test['acc_z'].values[i: i + 10]
+#         segments_test.append([xs, ys, zs])
 
-    reshaped_segments_test = np.asarray(segments_test, dtype = np.float32).reshape(-1, time_steps, 3)
-    predictions = model.predict(reshaped_segments_test)
+#     reshaped_segments_test = np.asarray(segments_test, dtype = np.float32).reshape(-1, time_steps, 3)
+#     predictions = model.predict(reshaped_segments_test)
 
-    for p in predictions:
-        if p[0] > p[1]:
-            print("bad", p)
-        else:
-            print("good", p)
+#     for p in predictions:
+#         arr  = ["KYPHOSIS", "LORDOSIS", "NORMAL", "SCOLIOSIS"]
+#         print(arr[p.index(max(p))])
 
 def predict_posture():
+    global sensor_1_data
+    global sensor_2_data
     num_data_points = min(len(sensor_1_data), len(sensor_2_data))
     if num_data_points == 0:
         return None
 
-    df1 = pd.DataFrame(np.array(sensor_1_data[0]["data"]))
-    df2 = pd.DataFrame(np.array(sensor_2_data[0]["data"]))
+    df1 = pd.DataFrame(np.array(sensor_1_data[-1]["data"]))
+    df2 = pd.DataFrame(np.array(sensor_2_data[-1]["data"]))
     df1 = df1.drop(columns=[6])
     df2 = df2.drop(columns=[6])
 
@@ -132,39 +123,40 @@ def predict_posture():
     reshaped_segments_test = np.asarray(segments_test, dtype = np.float32).reshape(-1, 10, 6)
     predictions = model.predict(reshaped_segments_test)
 
-    sensor_1_data.pop(0)
-    sensor_2_data.pop(0)
+    sensor_1_data = []
+    sensor_2_data = []
 
     global consecGood
     global consecBad
     global badCounter
 
     for p in predictions:
-        if p[0] > p[1]:
-            print("bad", p)
+        arr  = ["KYPHOSIS", "LORDOSIS", "NORMAL", "SCOLIOSIS"]
+        result = arr[np.argmax(p)] 
+        print(p, result)
+        if result != "NORMAL":
             consecGood = 0
             consecBad += 1
             if consecBad > 10:
                 badCounter += 1
-            return {"prediction": "bad"}
         else:
-            print("good", p)
             consecBad = 0
             consecGood += 1
             if consecGood > 10:
                 badCounter = 0
-            return {"prediction": "good"}
+        return {"prediction":result}
+
 
 def get_video_recommendations():
     global badCounter
     global currStatus
-    if badCounter < 30 and currStatus != "good":
+    if badCounter < 10 and currStatus != "good":
         currStatus = "good"
         return {"videos": goodVideos}
-    elif badCounter >= 30 and badCounter < 100 and currStatus != "medium":
+    elif badCounter >= 10 and badCounter < 20 and currStatus != "medium":
         currStatus = "medium"
         return {"videos": mediumVideos}
-    elif badCounter >= 100 and currStatus != "bad":
+    elif badCounter >= 20 and currStatus != "bad":
         currStatus = "bad"
         return {"videos": badVideos}
     return None
