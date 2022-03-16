@@ -332,13 +332,13 @@ def main():
     tag.accelerometer.enable()
     tag.gyroscope.enable()
     tag.battery.enable()
-    # tag.IO.enable()
+    tag.IO.enable()
 
     # Some sensors (e.g., temperature, accelerometer) need some time for initialization.
     # Not waiting here after enabling a sensor, the first read value might be empty or incorrect.
     time.sleep(5.0)
 
-    # tag.IO.deactivate_buzzer()
+    tag.IO.deactivate_buzzer()
 
     signal.signal(signal.SIGINT, sigint_handler)
     signal.signal(signal.SIGTERM, sigterm_handler)
@@ -382,7 +382,7 @@ def main():
             rows = rows[2:]
             
         # Send task to buffer in the while loop to avoid race condition
-        # notify_edge_devices(tag, arg.host)
+        notify_edge_devices(tag, arg.host)
 
         tag.waitForNotifications(arg.t)
     tag.disconnect()
